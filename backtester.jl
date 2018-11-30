@@ -27,27 +27,46 @@ function format(df)
     return df
 end
 
-function cross_strategy!(df; short=6, long=26)
+function find_first_long_crossing(df)
+    delta = 0.0
+    for i in 1:size(df, 1)
+        if df.Short[i] === missing || df.Long[i] === missing
+            continue
+        end
+        delta_prev = delta
+        delta = df.Short[i] - df.Long[i]
+        if delta > 0 && delta_prev < 0
+            return i
+        end
+    end
+end
+
+function remove_signals!(df, position)
+    for i in 1:position-1
+        df.Positions[i] = 0.0
+    end
+end
+
+function macd_long_strategy!(df; short=6, long=26)
     df.Short = ema(df.Close, short)
     df.Long = ema(df.Close, long)
 
     df.Positions = 1(df.Short .> df.Long)
     df.Positions = coalesce.(df.Positions, 0.0)
+    position = find_first_long_crossing(df)
+    remove_signals!(df, position)
     df.Signals = deepcopy(df.Positions)
     df.Signals[2:end] = diff(df.Signals)
 end
 
-function macd_strategy!(df; short=6, long=26)
+function macd_long_short_strategy!(df; short=6, long=26)
     df.Short = ema(df.Close, short)
     df.Long = ema(df.Close, long)
 
     df.Positions = 1(df.Short .> df.Long) + -1(df.Short .< df.Long)
-    i = 1
-    while df.Positions[i] === missing || df.Positions[i] == 0
-        df.Positions[i] = 1.0
-        i += 1
-    end
     df.Positions = coalesce.(df.Positions, 0.0)
+    position = find_first_long_crossing(df)
+    remove_signals!(df, position)
     df.Signals = deepcopy(df.Positions)
     df.Signals[2:end] = diff(df.Signals)
 end
@@ -56,11 +75,43 @@ function portfolio!(df; initial_capital=1000, quantity=1)
     positions = quantity * df.Positions
     positions_diff = quantity * df.Signals
 
-    df.Stock = positions .* df.Close
     df.Holdings = positions .* df.Close
     df.Cash = initial_capital .- cumsum(positions_diff .* df.Close)
     df.Total = df.Holdings .+ df.Cash
-    df.Returns = [1.0; df.Total[2:end] ./ df.Total[1:end-1]] .- 1.0
+    df.Returns = cumprod([1.0; df.Total[2:end] ./ df.Total[1:end-1]]) * 100 .- 100
+end
+
+function dynamic_portfolio!(df; initial_capital=1000)
+    df.Holdings = zeros(length(df.Positions))
+    df.Cash = zeros(length(df.Positions))
+    df.Cash[1] = initial_capital
+    df.Quantity = zeros(length(df.Positions))
+    current_position = 0
+
+    for i in 2:size(df,1)
+        quantity = abs(current_position)
+        df.Holdings[i] = current_position * df.Close[i] 
+        df.Cash[i] = df.Cash[i-1]
+
+        if df.Signals[i] > 0
+            quantity = floor((df.Cash[i] + df.Holdings[i]) / df.Close[i] + quantity) / abs(df.Signals[i])
+        end
+
+        df.Quantity[i] = quantity * abs(df.Signals[i])
+
+        position = ((df.Signals[i] > 0) ? floor((df.Cash[i] + df.Holdings[i]) / df.Close[i]) : quantity) * df.Positions[i]
+        positions_diff = quantity * df.Signals[i]
+
+        df.Holdings[i] = position * df.Close[i] 
+        df.Cash[i] = df.Cash[i] - positions_diff * df.Close[i]
+
+        if df.Signals[i] != 0
+            current_position = current_position + positions_diff 
+        end
+    end
+
+    df.Total = df.Holdings .+ df.Cash
+    df.Returns = (cumprod([1.0; df.Total[2:end] ./ df.Total[1:end-1]]) .- 1) * 100
 end
 
 function plot_strategy(df)
@@ -73,7 +124,7 @@ function plot_strategy(df)
     long_signals_layer = layer(x=long_signals.Date, y=long_signals.Close, Geom.point, shape=[Shape.xcross], Theme(default_color="green", point_size=2mm))
     short_signals_layer = layer(x=short_signals.Date, y=short_signals.Close, Geom.point, shape=[Shape.xcross], Theme(default_color="red", point_size=2mm))
 
-    stock_p = plot(long_signals_layer, short_signals_layer, long, short, stock, Theme(key_position=:none), Guide.xlabel("Time"), Guide.ylabel("SEK"), Guide.title("OMXS30 - MACD Strategy"))
+    stock_p = plot(long_signals_layer, short_signals_layer, long, short, stock, Theme(key_position=:none), Guide.xlabel("Time"), Guide.ylabel("Value"), Guide.title("OMXS30 - MACD Strategy"))
     stock_p |> SVG("plots/OMXS30.svg", 15inch, 8inch)
 end
 
@@ -81,19 +132,32 @@ function plot_perfomance(df)
     long_signals = df[(df.Signals .> 0), :]
     short_signals = df[(df.Signals .< 0), :]
 
-    strategy = layer(df, x=:Date, y=:Total, Geom.line)
-    long_signals_strategy = layer(x=long_signals.Date, y=long_signals.Total, Geom.point, shape=[Shape.xcross], Theme(default_color="green", point_size=2mm))
-    short_signals_strategy = layer(x=short_signals.Date, y=short_signals.Total, Geom.point, shape=[Shape.xcross], Theme(default_color="red", point_size=2mm))
+    strategy = layer(df, x=:Date, y=:Returns, Geom.line)
+    long_signals_strategy = layer(x=long_signals.Date, y=long_signals.Returns, Geom.point, shape=[Shape.xcross], Theme(default_color="green", point_size=2mm))
+    short_signals_strategy = layer(x=short_signals.Date, y=short_signals.Returns, Geom.point, shape=[Shape.xcross], Theme(default_color="red", point_size=2mm))
 
-    strategy_p = plot(long_signals_strategy, short_signals_strategy, strategy, Theme(key_position=:none), Guide.xlabel("Time"), Guide.ylabel("SEK"), Guide.title("OMXS30 - MACD Perfomance"))
+    strategy_p = plot(long_signals_strategy, short_signals_strategy, strategy, Theme(key_position=:none), Guide.xlabel("Time"), Guide.ylabel("Return (%)"), Guide.title("OMXS30 - MACD Perfomance"))
     strategy_p |> SVG("plots/OMXS30_Strategy.svg", 15inch, 8inch)
 end
 
+function print_log(df)
+    for row in eachrow(df)
+        if row.Signals > 0
+            println(row.Date, ": Long ", row.Quantity)
+        elseif row.Signals < 0
+            println(row.Date, ": Short ", row.Quantity)
+        end
+    end
+end
+
 df = get_dataframe(path = "csv/", filename = "OMXS30.csv")
-macd_strategy!(df, short=50, long=100)
+# macd_long_strategy!(df, short=50, long=100)
+macd_long_short_strategy!(df, short=50, long=100)
 plot_strategy(df)
 
-portfolio!(df, initial_capital=1500)
+dynamic_portfolio!(df, initial_capital=2000)
 plot_perfomance(df)
+
+print_log(df)
 
 end
