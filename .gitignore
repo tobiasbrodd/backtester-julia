@@ -2,3 +2,10 @@
 *.jl.*.cov
 *.jl.mem
 deps/deps.jl
+
+# macOS
+.DS_Store
+.vscode
+
+# SVG
+*.svg
