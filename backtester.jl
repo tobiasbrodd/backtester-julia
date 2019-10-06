@@ -15,10 +15,9 @@ function format(df)
     rename!(df, Symbol("Closing price") => :Close)
     rename!(df, Symbol("Average price") => :Average)
     rename!(df, Symbol("Total volume") => :Volume)
-    delete!(df, :Average)
-    delete!(df, :Volume)
-    delete!(df, :Turnover)
-    delete!(df, :Trades)
+    deletecols!(df, :Average)
+    deletecols!(df, :Volume)
+    deletecols!(df, :Turnover)
 
     df = df[(df.Close .!= 0), :]
 
@@ -39,6 +38,8 @@ function find_first_long_crossing(df)
             return i
         end
     end
+
+    return 1
 end
 
 function remove_signals!(df, position)
@@ -47,9 +48,21 @@ function remove_signals!(df, position)
     end
 end
 
-function macd_long_strategy!(df; short=6, long=26)
+function macd_long_strategy!(df; short::Int64=6, long::Int64=26)
     df.Short = ema(df.Close, short)
     df.Long = ema(df.Close, long)
+
+    df.Positions = 1(df.Short .> df.Long)
+    df.Positions = coalesce.(df.Positions, 0.0)
+    position = find_first_long_crossing(df)
+    remove_signals!(df, position)
+    df.Signals = deepcopy(df.Positions)
+    df.Signals[2:end] = diff(df.Signals)
+end
+
+function macd_long_strategy!(df; alpha::Float64=0.3, beta::Float64=0.07)
+    df.Short = ema(df.Close, alpha)
+    df.Long = ema(df.Close, beta)
 
     df.Positions = 1(df.Short .> df.Long)
     df.Positions = coalesce.(df.Positions, 0.0)
@@ -112,6 +125,8 @@ function dynamic_portfolio!(df; initial_capital=1000)
 
     df.Total = df.Holdings .+ df.Cash
     df.Returns = (cumprod([1.0; df.Total[2:end] ./ df.Total[1:end-1]]) .- 1) * 100
+
+    return df.Returns[end]
 end
 
 function plot_strategy(df)
@@ -150,12 +165,30 @@ function print_log(df)
     end
 end
 
+function backtest(short::Int64, long::Int64)
+    if short >= long || short <= 0 || long <= 0
+        return 0.0
+    end
+
+    df = get_dataframe(path = "csv/", filename = "OMXS30.csv")
+    macd_long_strategy!(df, short=short, long=long)
+    dynamic_portfolio!(df, initial_capital=2000)
+end
+
+function backtest(x)
+    alpha = x[1]
+    beta = x[2]
+    df = get_dataframe(path = "csv/", filename = "OMXS30.csv")
+    macd_long_strategy!(df, alpha=alpha, beta=beta)
+    -dynamic_portfolio!(df, initial_capital=2000)
+end
+
 df = get_dataframe(path = "csv/", filename = "OMXS30.csv")
-# macd_long_strategy!(df, short=50, long=100)
-macd_long_short_strategy!(df, short=50, long=100)
+# macd_long_strategy!(df, alpha=0.04, beta=0.02)
+macd_long_strategy!(df, short=50, long=100)
 plot_strategy(df)
 
-dynamic_portfolio!(df, initial_capital=2000)
+println(dynamic_portfolio!(df, initial_capital=2000))
 plot_perfomance(df)
 
 print_log(df)
